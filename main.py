@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+from typing import Optional
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 from dotenv import load_dotenv
@@ -13,37 +14,94 @@ load_dotenv()
 # Initialize Slack app with WebSocket mode
 app = AsyncApp(token=os.environ.get("SLACK_BOT_TOKEN"))
 
+
 def convert_markdown_to_slack(text: str) -> str:
     """Convert standard markdown formatting to Slack-compatible formatting"""
     # Convert **bold** to *bold* (Slack uses single asterisks for bold)
-    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"*\1*", text)
 
     # Convert ### headings to bold text with line breaks
-    text = re.sub(r'^### (.*?)$', r'*\1*', text, flags=re.MULTILINE)
-    text = re.sub(r'^## (.*?)$', r'*\1*', text, flags=re.MULTILINE)
-    text = re.sub(r'^# (.*?)$', r'*\1*', text, flags=re.MULTILINE)
+    text = re.sub(r"^### (.*?)$", r"*\1*", text, flags=re.MULTILINE)
+    text = re.sub(r"^## (.*?)$", r"*\1*", text, flags=re.MULTILINE)
+    text = re.sub(r"^# (.*?)$", r"*\1*", text, flags=re.MULTILINE)
 
     # Convert - list items to • (bullet points)
-    text = re.sub(r'^- (.*?)$', r'• \1', text, flags=re.MULTILINE)
+    text = re.sub(r"^- (.*?)$", r"• \1", text, flags=re.MULTILINE)
 
     # Preserve code blocks (triple backticks work in Slack)
     # No changes needed for ```code``` blocks
 
     return text
 
-async def process_with_claude(prompt: str) -> str:
+
+async def fetch_thread_messages(channel: str, thread_ts: str) -> list[dict]:
+    """Fetch the entire Slack thread for additional LLM context"""
+    messages: list[dict] = []
+    cursor = None
+
+    while True:
+        response = await app.client.conversations_replies(
+            channel=channel,
+            ts=thread_ts,
+            cursor=cursor,
+            limit=200,
+        )
+        messages.extend(response.get("messages", []))
+
+        cursor = response.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+
+    return messages
+
+
+def format_thread_messages(messages: list[dict]) -> str:
+    """Create a readable transcript from Slack thread messages"""
+    formatted = []
+    for msg in messages:
+        # Skip Slack events without visible text content
+        text = msg.get("text", "").strip()
+        if not text:
+            continue
+
+        if msg.get("subtype") == "bot_message":
+            user_label = msg.get("username") or "bot"
+        else:
+            user_label = msg.get("user") or msg.get("bot_id") or "unknown"
+
+        formatted.append(f"{user_label}: {text}")
+
+    return "\n".join(formatted)
+
+
+async def process_with_claude(prompt: str, thread_context: Optional[str] = None) -> str:
     """Process message with Claude agent and return response"""
-    print(f"Processing with Claude: {prompt}")
+    if thread_context:
+        composed_prompt = (
+            f"Thread transcript:\n{thread_context}\n\n"
+            f"{prompt}"
+        )
+    else:
+        composed_prompt = prompt
+
+    print(
+        "Processing with Claude: "
+        f"{'[thread context included]' if thread_context else composed_prompt}"
+    )
 
     response_text = ""
     async for message in query(
-        prompt=prompt,
+        prompt=composed_prompt,
         options=ClaudeAgentOptions(
             allowed_tools=[],
-            system_prompt="You are Myla, a professional facilitator. Be concise. If you didn't get any relevant data just say I don't know. You should not read docs. Try to use the subagents when possible and mention that you are using an agent for task.",
+            system_prompt="""
+You are Myla, a professional facilitator.
+You work in Slack as a bot. Be concise.
+You role is more like an orchestrator so try to use the subagents when possible and mention that you are using an agent for task.
+""".strip(),
             model="claude-haiku-4-5-20251001",
-            cwd=os.getcwd(),
-            setting_sources=["project"]
+            cwd=os.path.join(os.getcwd(), "project"),
+            setting_sources=["project"],
         ),
     ):
         if isinstance(message, AssistantMessage):
@@ -53,53 +111,77 @@ async def process_with_claude(prompt: str) -> str:
 
     return response_text or "I don't have a response for that."
 
+
 @app.message(".*")
 async def handle_message(message, say):
     """Handle incoming Slack messages"""
     try:
-        user_message = message['text']
-        user_id = message['user']
+        user_message = message["text"]
+        user_id = message["user"]
+        channel_id = message.get("channel")
+        thread_ts = message.get("thread_ts")
 
         print(f"Received message from {user_id}: {user_message}")
 
+        thread_context = None
+        if channel_id and thread_ts:
+            thread_messages = await fetch_thread_messages(channel_id, thread_ts)
+            thread_context = format_thread_messages(thread_messages)
+
         # Process message with Claude
-        claude_response = await process_with_claude(user_message)
+        claude_response = await process_with_claude(
+            user_message, thread_context=thread_context
+        )
 
         # Convert markdown formatting to Slack format
         formatted_response = convert_markdown_to_slack(claude_response)
 
         # Send response back to Slack as a threaded reply
-        await say(text=formatted_response, thread_ts=message['ts'])
+        reply_thread_ts = thread_ts or message["ts"]
+        await say(text=formatted_response, thread_ts=reply_thread_ts)
 
     except Exception as e:
         print(f"Error handling message: {e}")
         await say("Sorry, I encountered an error processing your message.")
 
+
 @app.event("app_mention")
 async def handle_app_mention(event, say):
     """Handle when the bot is mentioned"""
     try:
-        user_message = event['text']
-        user_id = event['user']
+        user_message = event["text"]
+        user_id = event["user"]
+        channel_id = event.get("channel")
+        thread_ts = event.get("thread_ts")
 
         print(f"Bot mentioned by {user_id}: {user_message}")
 
         # Remove the bot mention from the message
         # This assumes the bot mention is at the beginning
-        clean_message = user_message.split('>', 1)[-1].strip()
+        clean_message = user_message.split(">", 1)[-1].strip()
+
+        thread_context = None
+        if channel_id and thread_ts:
+            thread_messages = await fetch_thread_messages(channel_id, thread_ts)
+            thread_context = format_thread_messages(thread_messages)
 
         # Process message with Claude
-        claude_response = await process_with_claude(clean_message)
+        claude_response = await process_with_claude(
+            clean_message, thread_context=thread_context
+        )
 
         # Convert markdown formatting to Slack format
         formatted_response = convert_markdown_to_slack(claude_response)
+        print(f"Claude response: {formatted_response}")
 
         # Send response back to Slack as a threaded reply
-        await say(text=formatted_response, thread_ts=event['ts'])
+        reply_thread_ts = thread_ts or event["ts"]
+        await say(text=formatted_response, thread_ts=reply_thread_ts)
 
     except Exception as e:
         print(f"Error handling app mention: {e}")
         await say("Sorry, I encountered an error processing your mention.")
+
 
 async def start_slack_bot():
     """Start the Slack bot with WebSocket connection"""
@@ -108,6 +190,7 @@ async def start_slack_bot():
     # print(f"Claude response: {response}")
     handler = AsyncSocketModeHandler(app, os.environ.get("SLACK_APP_TOKEN"))
     await handler.start_async()
+
 
 def main():
     print("Starting Myla Slack Bot...")
@@ -123,6 +206,7 @@ def main():
 
     print("Connecting to Slack via WebSocket...")
     asyncio.run(start_slack_bot())
+
 
 if __name__ == "__main__":
     main()
