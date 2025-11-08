@@ -14,6 +14,37 @@ load_dotenv()
 # Initialize Slack app with WebSocket mode
 app = AsyncApp(token=os.environ.get("SLACK_BOT_TOKEN"))
 
+_user_name_cache: dict[str, str] = {}
+
+
+async def get_user_display_name(user_id: Optional[str]) -> str:
+    """Resolve a Slack user ID to a readable display name with caching."""
+    if not user_id:
+        return "unknown"
+
+    cached = _user_name_cache.get(user_id)
+    if cached:
+        return cached
+
+    try:
+        response = await app.client.users_info(user=user_id)
+    except Exception as exc:  # pragma: no cover - network failure handled gracefully
+        print(f"Failed to fetch user profile for {user_id}: {exc}")
+        return user_id
+
+    user_payload = response.get("user", {})
+    profile = user_payload.get("profile", {})
+
+    display_name = (
+        profile.get("display_name")
+        or profile.get("real_name")
+        or user_payload.get("name")
+        or user_id
+    )
+
+    _user_name_cache[user_id] = display_name
+    return display_name
+
 
 def convert_markdown_to_slack(text: str) -> str:
     """Convert standard markdown formatting to Slack-compatible formatting"""
@@ -52,6 +83,38 @@ async def fetch_thread_messages(channel: str, thread_ts: str) -> list[dict]:
         if not cursor:
             break
 
+    unresolved_user_ids: list[str] = []
+    for msg in messages:
+        # Prefer the name already embedded in the event payload
+        if msg.get("subtype") == "bot_message":
+            msg["user_label"] = msg.get("username") or msg.get("bot_id") or "bot"
+            continue
+
+        profile = msg.get("user_profile") or {}
+        profile_name = profile.get("display_name") or profile.get("real_name")
+        if profile_name:
+            msg["user_label"] = profile_name
+            continue
+
+        user_id = msg.get("user")
+        if user_id:
+            unresolved_user_ids.append(user_id)
+        else:
+            msg["user_label"] = msg.get("bot_id") or "unknown"
+
+    unique_user_ids = list({uid for uid in unresolved_user_ids})
+    if unique_user_ids:
+        resolved_labels = await asyncio.gather(
+            *(get_user_display_name(user_id) for user_id in unique_user_ids)
+        )
+        label_map = dict(zip(unique_user_ids, resolved_labels))
+
+        for msg in messages:
+            if msg.get("user_label"):
+                continue
+            user_id = msg.get("user")
+            msg["user_label"] = label_map.get(user_id, user_id or "unknown")
+
     return messages
 
 
@@ -64,10 +127,12 @@ def format_thread_messages(messages: list[dict]) -> str:
         if not text:
             continue
 
-        if msg.get("subtype") == "bot_message":
-            user_label = msg.get("username") or "bot"
-        else:
-            user_label = msg.get("user") or msg.get("bot_id") or "unknown"
+        user_label = msg.get("user_label")
+        if not user_label:
+            if msg.get("subtype") == "bot_message":
+                user_label = msg.get("username") or "bot"
+            else:
+                user_label = msg.get("user") or msg.get("bot_id") or "unknown"
 
         formatted.append(f"{user_label}: {text}")
 
@@ -158,7 +223,7 @@ Your role is more like an orchestrator so try to use the subagents when possible
 When posting in **summary mode**:
 
 ```
-@parleybot
+@myla
 **Topic:** <summarized decision or question>
 **Key Perspectives:**
 - <person A>: <their stance>
@@ -176,10 +241,10 @@ When posting in **summary mode**:
 
 When posting in **mediation mode** (conversation still active):
 
-> “Hey team 👋 — sounds like we’re circling around two main issues: stability vs. sprint capacity.
+> Hey team 👋 — sounds like we’re circling around two main issues: stability vs. sprint capacity.
 > Here’s what the facts say — the bug is a P0, and the refactor is scoped as high priority.
 > We can balance both by doing the hooks-only refactor this sprint and Redux next sprint.
-> That gets us stability without derailing delivery. Sound fair?”
+> That gets us stability without derailing delivery.
 """.strip(),
             model="claude-haiku-4-5-20251001",
             cwd=os.path.join(os.getcwd(), "project"),
@@ -244,11 +309,11 @@ async def handle_app_mention(event, say):
 
         thread_context = None
         if channel_id and thread_ts:
-            print(f"Fetching thread messages for context in channel {channel_id}, thread {thread_ts}")
+            # print(f"Fetching thread messages for context in channel {channel_id}, thread {thread_ts}")
             thread_messages = await fetch_thread_messages(channel_id, thread_ts)
-            print(f"Fetched thread messages:\n{thread_messages}")
+            # print(f"Fetched thread messages:\n{thread_messages}")
             thread_context = format_thread_messages(thread_messages)
-            print(f"Thread context:\n{thread_context}")
+            # print(f"Thread context:\n{thread_context}")
 
         # Process message with Claude
         claude_response = await process_with_claude(
