@@ -1,199 +1,128 @@
+import asyncio
 import os
-import glob
 import re
-from slack_bolt import App
-from slack_bolt.adapter.socket_mode import SocketModeHandler
-import openai
+
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 from dotenv import load_dotenv
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.async_app import AsyncApp
 
-print('Starting bot...')
-
+# Load environment variables from .env file
 load_dotenv()
 
-# Initialize Slack app
-app = App(token=os.environ["SLACK_BOT_TOKEN"])
-openai.api_key = os.environ["OPENAI_API_KEY"]
+# Initialize Slack app with WebSocket mode
+app = AsyncApp(token=os.environ.get("SLACK_BOT_TOKEN"))
 
+def convert_markdown_to_slack(text: str) -> str:
+    """Convert standard markdown formatting to Slack-compatible formatting"""
+    # Convert **bold** to *bold* (Slack uses single asterisks for bold)
+    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
 
-def search_docs_for_context(conversation_text):
-    """Search through docs folder for relevant context based on conversation keywords"""
-    print('Searching docs for relevant context...')
-    
-    # Extract keywords from conversation (simple approach)
-    keywords = []
-    # Look for common technical terms, bug references, feature names, etc.
-    keyword_patterns = [
-        r'\b(bug|error|issue|problem|fail)\w*\b',
-        r'\b(feature|enhancement|improvement)\w*\b', 
-        r'\b(board|crm|redux|react|database|ui|performance)\w*\b',
-        r'\b(sprint|deployment|testing|refactor)\w*\b',
-        r'\b(P[0-9]|critical|high|medium|low)\b',
-        r'\b(FEAT-\d+|BUG-\d+)\b'  # JIRA ticket patterns
-    ]
-    
-    for pattern in keyword_patterns:
-        matches = re.findall(pattern, conversation_text, re.IGNORECASE)
-        keywords.extend([match.lower() for match in matches])
-    
-    # Remove duplicates and common words
-    keywords = list(set(keywords))
-    keywords = [k for k in keywords if len(k) > 2]
-    
-    print(f'Found keywords: {keywords}')
-    
-    # Search through docs files
-    docs_context = []
-    docs_folder = os.path.join(os.path.dirname(__file__), 'docs')
-    
-    if os.path.exists(docs_folder):
-        for doc_file in glob.glob(os.path.join(docs_folder, '*.md')):
-            try:
-                with open(doc_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    
-                # Check if any keywords appear in this document
-                relevant_sections = []
-                lines = content.split('\n')
-                
-                for i, line in enumerate(lines):
-                    for keyword in keywords:
-                        if keyword in line.lower():
-                            # Extract context around the match (3 lines before and after)
-                            start = max(0, i - 3)
-                            end = min(len(lines), i + 4)
-                            context_lines = lines[start:end]
-                            
-                            relevant_sections.append({
-                                'file': os.path.basename(doc_file),
-                                'context': '\n'.join(context_lines),
-                                'keyword': keyword
-                            })
-                            break  # Only one match per line to avoid duplicates
-                
-                if relevant_sections:
-                    docs_context.extend(relevant_sections[:3])  # Limit to 3 sections per file
-                    
-            except Exception as e:
-                print(f'Error reading {doc_file}: {e}')
-    
-    return docs_context[:10]  # Limit total context to avoid token limits
+    # Convert ### headings to bold text with line breaks
+    text = re.sub(r'^### (.*?)$', r'*\1*', text, flags=re.MULTILINE)
+    text = re.sub(r'^## (.*?)$', r'*\1*', text, flags=re.MULTILINE)
+    text = re.sub(r'^# (.*?)$', r'*\1*', text, flags=re.MULTILINE)
 
+    # Convert - list items to • (bullet points)
+    text = re.sub(r'^- (.*?)$', r'• \1', text, flags=re.MULTILINE)
 
-def fetch_thread_messages(client, channel, thread_ts):
-    print('Fetching thread messages...')
-    print(channel, thread_ts)
-    """Fetch all messages in a thread"""
-    result = client.conversations_replies(
-        channel=channel,
-        ts=thread_ts,
-        inclusive=True
-    )
-    
-    messages = []
-    for msg in result["messages"]:
-        user_id = msg.get("user", "Unknown")
-        # Get user name
-        try:
-            user_info = client.users_info(user=user_id)
-            user_name = user_info["user"]["real_name"]
-        except:
-            user_name = user_id
-        
-        messages.append({
-            "user": user_name,
-            "text": msg.get("text", ""),
-            "ts": msg["ts"]
-        })
-    
-    return messages
+    # Preserve code blocks (triple backticks work in Slack)
+    # No changes needed for ```code``` blocks
 
+    return text
 
-def analyze_thread_with_llm(messages):
-    """Send thread to LLM for analysis with docs context"""
-    print('Analyzing thread with LLM...')
-    # Build conversation context
-    conversation = "\n\n".join([
-        f"**{msg['user']}**: {msg['text']}" 
-        for msg in messages
-    ])
-    
-    # Get relevant documentation context
-    docs_context = search_docs_for_context(conversation)
-    
-    # Build context section for prompt
-    context_section = ""
-    if docs_context:
-        context_section = "\n\n:books: **RELEVANT DOCUMENTATION CONTEXT:**\n"
-        for ctx in docs_context:
-            context_section += f"\n**From {ctx['file']} (keyword: {ctx['keyword']}):**\n"
-            context_section += f"```\n{ctx['context']}\n```\n"
-    
-    prompt = f"""You are an intelligent analyzer agent with access to multiple specialized sub-agents (GitHub agent, JIRA agent, documentation agent, etc.) that help you gather comprehensive context about project discussions.
+async def process_with_claude(prompt: str) -> str:
+    """Process message with Claude agent and return response"""
+    print(f"Processing with Claude: {prompt}")
 
-Your task:
-Analyze this Slack conversation and provide your informed opinion based on data retrieved from your sub-agents.
+    response_text = ""
+    async for message in query(
+        prompt=prompt,
+        options=ClaudeAgentOptions(
+            allowed_tools=[],
+            system_prompt="You are Myla, a professional facilitator. Be concise. If you didn't get any relevant data just say I don't know. You should not read docs. Try to use the subagents when possible and mention that you are using an agent for task.",
+            model="claude-haiku-4-5-20251001",
+            cwd=os.getcwd(),
+            setting_sources=["project"]
+        ),
+    ):
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    response_text += block.text
 
-Thread conversation:
-{conversation}{context_section}
+    return response_text or "I don't have a response for that."
 
-Respond in this format:
+@app.message(".*")
+async def handle_message(message, say):
+    """Handle incoming Slack messages"""
+    try:
+        user_message = message['text']
+        user_id = message['user']
 
-**CONVERSATION SUMMARY**
-[Brief 1-2 sentence summary of what was discussed]
+        print(f"Received message from {user_id}: {user_message}")
 
-**CONTEXT GATHERED**
-:mag: **Sub-agents consulted:** [List which agents you used - e.g., "GitHub agent, JIRA agent, Documentation agent"]
-:bar_chart: **Key metrics/data found:** [Relevant data points, code references, ticket status, etc.]
-:clipboard: **Related context:** [Background information from documentation, similar issues, technical debt, etc.]
+        # Process message with Claude
+        claude_response = await process_with_claude(user_message)
 
-**MY ANALYSIS & OPINION**
-:thought_balloon: [Your thoughtful opinion on the discussion based on all gathered context. What do you think about the situation? What insights can you provide? What recommendations do you have? Be analytical and provide your perspective as an AI that has access to comprehensive project knowledge.]
+        # Convert markdown formatting to Slack format
+        formatted_response = convert_markdown_to_slack(claude_response)
 
-Keep it concise but insightful. Focus on providing value through your analysis rather than just restating facts."""
+        # Send response back to Slack as a threaded reply
+        await say(text=formatted_response, thread_ts=message['ts'])
 
-    response = openai.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": "You are a professional facilitator with access to project documentation."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3,
-        max_tokens=1200  # Increased to accommodate documentation context
-    )
-    
-    return response.choices[0].message.content
-
+    except Exception as e:
+        print(f"Error handling message: {e}")
+        await say("Sorry, I encountered an error processing your message.")
 
 @app.event("app_mention")
-def handle_mention(event, client, say):
-    """Triggered when bot is mentioned"""
-    print('Handling mention...')    
-    print(event)
-    channel = event["channel"]
-    thread_ts = event.get("thread_ts", event["ts"])
-    
-    # Show typing indicator
-    say(":robot_face: Analyzing thread...", thread_ts=thread_ts)
-    
+async def handle_app_mention(event, say):
+    """Handle when the bot is mentioned"""
     try:
-        # Fetch thread messages
-        messages = fetch_thread_messages(client, channel, thread_ts)
-        
-        # Analyze with LLM
-        analysis = analyze_thread_with_llm(messages)
-        
-        # Post results
-        say(
-            text=analysis,
-            thread_ts=thread_ts,
-            unfurl_links=False,
-            unfurl_media=False
-        )
-        
-    except Exception as e:
-        say(f":x: Error: {str(e)}", thread_ts=thread_ts)
+        user_message = event['text']
+        user_id = event['user']
 
+        print(f"Bot mentioned by {user_id}: {user_message}")
+
+        # Remove the bot mention from the message
+        # This assumes the bot mention is at the beginning
+        clean_message = user_message.split('>', 1)[-1].strip()
+
+        # Process message with Claude
+        claude_response = await process_with_claude(clean_message)
+
+        # Convert markdown formatting to Slack format
+        formatted_response = convert_markdown_to_slack(claude_response)
+
+        # Send response back to Slack as a threaded reply
+        await say(text=formatted_response, thread_ts=event['ts'])
+
+    except Exception as e:
+        print(f"Error handling app mention: {e}")
+        await say("Sorry, I encountered an error processing your mention.")
+
+async def start_slack_bot():
+    """Start the Slack bot with WebSocket connection"""
+    # For testing purposes
+    # response = await process_with_claude("What's our current sprint status?")
+    # print(f"Claude response: {response}")
+    handler = AsyncSocketModeHandler(app, os.environ.get("SLACK_APP_TOKEN"))
+    await handler.start_async()
+
+def main():
+    print("Starting Myla Slack Bot...")
+
+    # Check for required environment variables
+    if not os.environ.get("SLACK_BOT_TOKEN"):
+        print("Error: SLACK_BOT_TOKEN environment variable is required")
+        return
+
+    if not os.environ.get("SLACK_APP_TOKEN"):
+        print("Error: SLACK_APP_TOKEN environment variable is required")
+        return
+
+    print("Connecting to Slack via WebSocket...")
+    asyncio.run(start_slack_bot())
 
 if __name__ == "__main__":
-    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    handler.start()
+    main()
