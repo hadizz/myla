@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  myla-bot:
+    build: .
+    container_name: myla-slack-bot
+    restart: unless-stopped
+    
+    # Mount your code directory for live development
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    
+    # Environment variables - create a .env file with your actual values
+    env_file:
+      - .env
+    
+    # Optional: if you need to expose ports for health checks or webhooks
+    # ports:
+    #   - "8000:8000"
+    
+    # Keep container running and restart on code changes
+    command: python main_mcp.py
+    
+    # Optional: Add health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add a development service that watches for file changes
+  myla-bot-dev:
+    build: .
+    container_name: myla-slack-bot-dev
+    restart: unless-stopped
+    profiles: ["dev"]  # Only run when explicitly specified
+    
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    
+    env_file:
+      - .env
+    
+    # Use watchdog to restart on file changes
+    command: >
+      sh -c "pip install watchdog &&
+             python -m watchdog.observers /app --patterns='*.py' --command='python main_mcp.py' --restart"
+    
+    environment:
+      - PYTHONPATH=/app
+      - DEVELOPMENT=true

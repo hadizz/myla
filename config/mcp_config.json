@@ -1,0 +1,202 @@
+{
+  "mcpServers": {
+    "github-agent": {
+      "command": "python",
+      "args": ["mcp_servers/github_mcp_server.py"],
+      "description": "GitHub code analysis and repository insights",
+      "capabilities": [
+        "analyze_code_structure",
+        "search_code_issues", 
+        "get_testing_status",
+        "get_performance_metrics",
+        "analyze_technical_debt"
+      ]
+    },
+    "jira-agent": {
+      "command": "python", 
+      "args": ["mcp_servers/jira_mcp_server.py"],
+      "description": "JIRA task management and sprint tracking",
+      "capabilities": [
+        "get_sprint_status",
+        "search_tasks",
+        "get_task_details",
+        "create_task",
+        "get_critical_issues",
+        "get_sprint_metrics",
+        "update_task_status"
+      ]
+    },
+    "product-manager-agent": {
+      "command": "python",
+      "args": ["mcp_servers/pm_mcp_server.py"], 
+      "description": "Product management and technical debt analysis",
+      "capabilities": [
+        "analyze_technical_debt",
+        "create_risk_assessment",
+        "prioritize_debt_items",
+        "generate_sprint_recommendations",
+        "assess_quality_gates",
+        "request_jira_data",
+        "create_technical_debt_task",
+        "analyze_team_capacity"
+      ]
+    },
+    "google-docs-agent": {
+      "command": "python",
+      "args": ["mcp_servers/docs_mcp_server.py"],
+      "description": "Google Docs document management and creation",
+      "capabilities": [
+        "search_documents",
+        "get_document",
+        "create_document", 
+        "get_document_templates",
+        "analyze_document_activity",
+        "get_recent_documents",
+        "create_meeting_notes",
+        "update_document_status"
+      ]
+    },
+    "inter-agent-coordinator": {
+      "command": "python",
+      "args": ["mcp_servers/inter_agent_mcp_server.py"],
+      "description": "Inter-agent communication and workflow coordination",
+      "capabilities": [
+        "send_agent_message",
+        "create_coordination_task",
+        "update_task_status",
+        "get_agent_messages",
+        "simulate_agent_communication",
+        "get_agent_workload",
+        "orchestrate_workflow",
+        "get_coordination_metrics"
+      ]
+    }
+  },
+  "orchestrator": {
+    "default_timeout": 30,
+    "max_retries": 3,
+    "retry_delay": 1.0,
+    "backoff_factor": 2.0,
+    "max_concurrent_connections": 10
+  },
+  "agent_routing": {
+    "github_keywords": [
+      "code", "repository", "testing", "performance", "technical debt",
+      "bug", "component", "refactor", "coverage", "lint", "typescript",
+      "react", "redux", "ui", "frontend", "build", "deployment"
+    ],
+    "jira_keywords": [
+      "task", "ticket", "sprint", "bug", "feature", "story", "epic",
+      "priority", "status", "assign", "create", "update", "backlog",
+      "velocity", "burndown", "critical", "blocker"
+    ],
+    "product_manager_keywords": [
+      "prioritize", "risk", "assessment", "capacity", "planning",
+      "recommendation", "strategy", "roadmap", "stakeholder", "business",
+      "requirements", "scope", "timeline", "resource", "quality gate"
+    ],
+    "google_docs_keywords": [
+      "document", "doc", "meeting", "notes", "specification", "prd",
+      "requirements", "template", "search", "create", "write", "share",
+      "collaborate", "review", "approve", "publish"
+    ]
+  },
+  "workflows": {
+    "technical_debt_analysis": {
+      "description": "Comprehensive technical debt analysis workflow",
+      "steps": [
+        {
+          "agent": "product-manager-agent",
+          "action": "analyze_technical_debt",
+          "description": "Analyze and prioritize technical debt items"
+        },
+        {
+          "agent": "github-agent", 
+          "action": "analyze_technical_debt",
+          "description": "Get code-level technical debt insights",
+          "depends_on": ["step_1"]
+        },
+        {
+          "agent": "jira-agent",
+          "action": "create_task",
+          "description": "Create JIRA tasks for high-priority debt items",
+          "depends_on": ["step_1", "step_2"]
+        },
+        {
+          "agent": "google-docs-agent",
+          "action": "create_document",
+          "description": "Document the analysis results and recommendations",
+          "depends_on": ["step_1", "step_2", "step_3"]
+        }
+      ]
+    },
+    "sprint_planning": {
+      "description": "Comprehensive sprint planning workflow",
+      "steps": [
+        {
+          "agent": "jira-agent",
+          "action": "get_sprint_status",
+          "description": "Get current sprint status and metrics"
+        },
+        {
+          "agent": "github-agent",
+          "action": "get_testing_status", 
+          "description": "Analyze technical constraints and testing requirements"
+        },
+        {
+          "agent": "product-manager-agent",
+          "action": "generate_sprint_recommendations",
+          "description": "Create sprint planning recommendations",
+          "depends_on": ["step_1", "step_2"]
+        },
+        {
+          "agent": "google-docs-agent",
+          "action": "create_document",
+          "description": "Create sprint planning document",
+          "depends_on": ["step_3"]
+        }
+      ]
+    },
+    "bug_investigation": {
+      "description": "Multi-agent bug investigation workflow",
+      "steps": [
+        {
+          "agent": "jira-agent",
+          "action": "get_critical_issues",
+          "description": "Get critical bug reports from JIRA"
+        },
+        {
+          "agent": "github-agent",
+          "action": "search_code_issues",
+          "description": "Search for related code issues and patterns",
+          "depends_on": ["step_1"]
+        },
+        {
+          "agent": "product-manager-agent",
+          "action": "create_risk_assessment",
+          "description": "Assess risk and impact of critical bugs",
+          "depends_on": ["step_1", "step_2"]
+        },
+        {
+          "agent": "google-docs-agent",
+          "action": "create_document",
+          "description": "Document investigation findings and action plan",
+          "depends_on": ["step_1", "step_2", "step_3"]
+        }
+      ]
+    }
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/mcp_orchestrator.log",
+    "max_size": "10MB",
+    "backup_count": 5,
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  },
+  "monitoring": {
+    "health_check_interval": 60,
+    "performance_metrics": true,
+    "error_tracking": true,
+    "agent_status_monitoring": true
+  }
+}
