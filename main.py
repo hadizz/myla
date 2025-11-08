@@ -46,6 +46,15 @@ async def get_user_display_name(user_id: Optional[str]) -> str:
     return display_name
 
 
+def is_bot_message(msg: dict) -> bool:
+    """Determine whether a Slack event message originated from a bot."""
+    if msg.get("subtype") == "bot_message":
+        return True
+    if msg.get("bot_id") and not msg.get("user"):
+        return True
+    return False
+
+
 def convert_markdown_to_slack(text: str) -> str:
     """Convert standard markdown formatting to Slack-compatible formatting"""
     # Convert **bold** to *bold* (Slack uses single asterisks for bold)
@@ -83,12 +92,13 @@ async def fetch_thread_messages(channel: str, thread_ts: str) -> list[dict]:
         if not cursor:
             break
 
+    human_messages: list[dict] = []
     unresolved_user_ids: list[str] = []
     for msg in messages:
-        # Prefer the name already embedded in the event payload
-        if msg.get("subtype") == "bot_message":
-            msg["user_label"] = msg.get("username") or msg.get("bot_id") or "bot"
+        if is_bot_message(msg):
             continue
+
+        human_messages.append(msg)
 
         profile = msg.get("user_profile") or {}
         profile_name = profile.get("display_name") or profile.get("real_name")
@@ -109,13 +119,13 @@ async def fetch_thread_messages(channel: str, thread_ts: str) -> list[dict]:
         )
         label_map = dict(zip(unique_user_ids, resolved_labels))
 
-        for msg in messages:
+        for msg in human_messages:
             if msg.get("user_label"):
                 continue
             user_id = msg.get("user")
             msg["user_label"] = label_map.get(user_id, user_id or "unknown")
 
-    return messages
+    return human_messages
 
 
 def format_thread_messages(messages: list[dict]) -> str:
@@ -125,6 +135,8 @@ def format_thread_messages(messages: list[dict]) -> str:
         # Skip Slack events without visible text content
         text = msg.get("text", "").strip()
         if not text:
+            continue
+        if is_bot_message(msg):
             continue
 
         user_label = msg.get("user_label")
@@ -199,9 +211,9 @@ Your role is more like an orchestrator so try to use the subagents when possible
 
 ## 4. Guide Toward Resolution
 - Propose a **specific, realistic path forward** that balances technical and product considerations.
-- Encourage a **shared decision** by summarizing facts and tradeoffs.
-- Explicitly call for light confirmation (e.g. “Sound good to everyone?”).
-- If agreement is reached, log a **Decision Note** in concise, professional format.
+- Deliver a single, conclusive resolution message that summarizes the situation, presents the final reasoning, and clearly states the agreed or optimal path forward.
+- The message should sound final and confident — no follow-up questions or prompts for confirmation.
+- End with a short motivational or collaborative closure line (e.g., “Let’s move ahead with this plan.” or “That way, we all win.”).
 
 ---
 
@@ -214,6 +226,7 @@ Your role is more like an orchestrator so try to use the subagents when possible
 - **Evidence:** Reference facts clearly but conversationally (e.g., “According to the sprint doc, this is marked high priority…”).
 - **Transparency:** Never fabricate data; if something is unknown, acknowledge that.
 - **Frequency:** Intervene **only when needed** — when conflict arises, or when participants repeat without progress.
+- **Finality:** When you intervene, deliver your message as a full resolution — avoid asking questions or inviting responses. Your goal is to close the discussion, not continue it.
 - **Autonomy:** You coordinate, not command. Present balanced recommendations, not ultimatums.
 
 ---
@@ -236,7 +249,8 @@ When posting in **summary mode**:
 **Recommendation:**
 <neutral, balanced proposal>
 
-✅ <optional closing line like “Sound good to everyone?”>
+End decisively, e.g.:
+“This approach resolves the issue while keeping us aligned with sprint goals. Let’s proceed.”
 ```
 
 When posting in **mediation mode** (conversation still active):
@@ -256,7 +270,7 @@ When posting in **mediation mode** (conversation still active):
                 if isinstance(block, TextBlock):
                     response_text += block.text
 
-    return response_text or "I don't have a response for that."
+    return response_text
 
 
 @app.message(".*")
@@ -326,7 +340,7 @@ async def handle_app_mention(event, say):
 
         # Send response back to Slack as a threaded reply
         reply_thread_ts = thread_ts or event["ts"]
-        # await say(text=formatted_response, thread_ts=reply_thread_ts)
+        await say(text=formatted_response, thread_ts=reply_thread_ts)
 
     except Exception as e:
         print(f"Error handling app mention: {e}")
